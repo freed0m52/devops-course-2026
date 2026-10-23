@@ -29,6 +29,7 @@ else
 fi
 check "MaxAuthTries равен 3" "3" "$(sudo sshd -T | awk '/^maxauthtries/{print $2}')"
 
+echo "[2] Межсетевой экран"
 check "Межсетевой экран активен" "active" "$(sudo ufw status | awk '/^Status:/{print $2}')"
 DEFAULT_IN=$(sudo ufw status verbose | awk '/^Default:/{print $2}')
 check "Политика по умолчанию deny incoming" "deny" "$DEFAULT_IN"
@@ -37,8 +38,6 @@ echo "[3] Учётные записи"
 awk -F: ' $3>=1000 && $3<65534 {printf " %s (uid=%s)\n",$1,$3}' /etc/passwd
 
 echo "[4] Веб-сервер"
-
-# Проверка а) конфигурация nginx синтаксически корректна
 if sudo nginx -t > /dev/null 2>&1; then
   echo " [OK]  Конфигурация nginx синтаксически корректна"
   ((PASS++))
@@ -47,7 +46,6 @@ else
   ((FAIL++))
 fi
 
-# Проверка б) сертификат истекает не ранее чем через 30 дней
 if sudo openssl x509 -in /etc/ssl/certs/devops.crt -checkend 2592000 -noout > /dev/null 2>&1; then
   echo " [OK]  Сертификат действителен более 30 дней"
   ((PASS++))
@@ -56,7 +54,6 @@ else
   ((FAIL++))
 fi
 
-# Проверка в) нет файлов, доступных для записи всем
 WORLD_WRITABLE=$(sudo find /var/www/devops-site -perm -o+w 2>/dev/null)
 if [[ -z "$WORLD_WRITABLE" ]]; then
   echo " [OK]  Файлов с правом записи для всех не найдено"
@@ -66,8 +63,31 @@ else
   ((FAIL++))
 fi
 
-# Проверка г) права ключа TLS равны 600
 check "Права ключа TLS равны 600" "600" "$(sudo stat -c '%a' /etc/ssl/private/devops.key 2>/dev/null)"
+
+echo "[5] Контейнеризация"
+
+# Проверка а) служба docker активна
+DOCKER_STATE=$(systemctl is-active docker 2>/dev/null || true)
+check "Служба docker активна" "active" "$DOCKER_STATE"
+
+# Проверка б) контейнер СУБД healthy
+DB_HEALTH=$(sudo docker inspect -f '{{.State.Health.Status}}' app-db-1 2>/dev/null || echo "not_found")
+check "Контейнер СУБД healthy" "healthy" "$DB_HEALTH"
+
+# Проверка в) порты 5000 и 5432 не прослушиваются вне 127.0.0.1
+PORTS_OUT=$(ss -tln 2>/dev/null | grep -E ':(5000|5432)\b' | grep -v '127.0.0.1' | wc -l)
+if [[ "$PORTS_OUT" -eq 0 ]]; then
+  echo " [OK]  Порты 5000 и 5432 не прослушиваются вне 127.0.0.1"
+  ((PASS++))
+else
+  echo " [FAIL] Найдены порты 5000 или 5432 вне 127.0.0.1"
+  ((FAIL++))
+fi
+
+# Проверка г) права .env = 600
+ENV_PERMS=$(stat -c '%a' ~/app/.env 2>/dev/null || echo "missing")
+check "Права .env равны 600" "600" "$ENV_PERMS"
 
 echo "Пройдено: $PASS, не пройдено: $FAIL"
 [[ $FAIL -eq 0 ]] && exit 0 || exit 1
